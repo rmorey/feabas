@@ -8,6 +8,7 @@ def readme():
         return f.read()
 
 install_requires = [
+    'boto3',
     'google-cloud-storage',
     'h5py',
     'numpy<2',

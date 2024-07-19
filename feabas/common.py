@@ -8,30 +8,59 @@ from scipy import sparse
 from scipy.ndimage import gaussian_filter1d
 import scipy.sparse.csgraph as csgraph
 
-
+import boto3
+from botocore.config import Config
 
 Match = namedtuple('Match', ('xy0', 'xy1', 'weight'))
 
 
 def imread(path, **kwargs):
-    flag = kwargs.get('flag', cv2.IMREAD_UNCHANGED)
-    if path.startswith('gs://') or path.startswith('s3://') or path.startswith('http://') or path.startswith('https://'):
-        if path.lower().endswith('.png'):
-            driver = 'png'
-        elif path.lower().endswith('.bmp'):
-            driver = 'bmp'
-        elif path.lower().endswith('.tif') or path.lower().endswith('.tiff'):
-            driver = 'tiff'
-        elif path.lower().endswith('.jpg') or path.lower().endswith('.jpeg'):
-            driver = 'jpeg'
-        elif path.lower().endswith('.avif'):
-            driver = 'avif'
-        elif path.lower().endswith('.webp'):
-            driver = 'webp'
+    flag = kwargs.get("flag", cv2.IMREAD_UNCHANGED)
+    if path.startswith("matrix://"):
+        
+        endpoint_url = os.getenv("MATRIX_ENDPOINT_URL")
+        access_key = os.getenv("MATRIX_ACCESS_KEY")
+        secret_key = os.getenv("MATRIX_SECRET_KEY")
+        if endpoint_url is None or access_key is None or secret_key is None:
+            raise ValueError("MATRIX_ENDPOINT_URL, MATRIX_ACCESS_KEY, MATRIX_SECRET_KEY must be set.")
+
+        actual_path = path.replace("matrix://", "")
+        bucket_name, object_key = actual_path.split("/", 1)
+
+        matrix_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(signature_version="s3v4"),
+        )
+        response = matrix_client.get_object(Bucket=bucket_name, Key=object_key)
+        image_data = response["Body"].read() # todo: catch exceptions here and retry
+        image_array = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(image_array, flag)
+    elif (
+        path.startswith("gs://")
+        or path.startswith("s3://")
+        or path.startswith("http://")
+        or path.startswith("https://")
+    ):
+        if path.lower().endswith(".png"):
+            driver = "png"
+        elif path.lower().endswith(".bmp"):
+            driver = "bmp"
+        elif path.lower().endswith(".tif") or path.lower().endswith(".tiff"):
+            driver = "tiff"
+        elif path.lower().endswith(".jpg") or path.lower().endswith(".jpeg"):
+            driver = "jpeg"
+        elif path.lower().endswith(".avif"):
+            driver = "avif"
+        elif path.lower().endswith(".webp"):
+            driver = "webp"
         else:
-            raise ValueError(f'format not supported: {path}')
+            raise ValueError(f"format not supported: {path}")
         import tensorstore as ts
-        js_spec = {'driver': driver, 'kvstore': path}
+
+        js_spec = {"driver": driver, "kvstore": path}
         try:
             ts_data = ts.open(js_spec).result()
             img = ts_data.read().result()
@@ -46,10 +75,11 @@ def imread(path, **kwargs):
         except ValueError:
             img = None
     else:
-        if path.startswith('file://'):
-            path = path.replace('file://', '')
+        if path.startswith("file://"):
+            path = path.replace("file://", "")
         img = cv2.imread(path, flag)
     return img
+
 
 
 def imwrite(path, image):
