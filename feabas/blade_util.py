@@ -4,19 +4,29 @@ import pandas as pd
 import numpy as np
 import cv2
 import os
-
+import boto3
+from botocore import Config
+from io import StringIO
 from feabas import config
 
 DEFAULT_SUBTILE_OVERLAP = 0.2
 DEFAULT_SUPERTILE_OVERLAP = 0.2
 
 # Generate supertile map from stage_positions.csv
+# TODO: remove need for pandas
 def generate_supertile_map(section_path):
     csv_path = Path(section_path) / 'metadata' / 'stage_positions.csv'
-    # Load the CSV file into a pandas DataFrame
-    df = pd.read_csv(str(csv_path))
-    
-    # Correct the column names by removing leading spaces
+    if csv_path.startswith("matrix://"):
+        matrix_client = get_matrix_client()
+        actual_path = csv_path.replace("matrix://", "")
+        bucket_name, object_key = actual_path.split("/", 1)
+        csv_obj = matrix_client.get_object(Bucket=bucket_name, Key=object_key)
+        df = pd.read_csv(StringIO(csv_obj['Body'].read().decode('utf-8')))
+    else:
+        df = pd.read_csv(str(csv_path))
+    return generate_supertile_map_from_df(df)
+
+def generate_supertile_map_from_df(df):
     df.columns = [col.strip() for col in df.columns]
     
     # Normalize the stage_x_nm and stage_y_nm values
@@ -53,8 +63,6 @@ def generate_tile_id_map(supertile_map):
                         current_row.append(f"{supertile:04}_{subtile}")
             tile_id_map.append(current_row)
     return np.array(tile_id_map)
-
-
 
 def get_subtile_pos(supertile_map, subtile_size, subtile_overlap=DEFAULT_SUBTILE_OVERLAP, supertile_overlap=DEFAULT_SUPERTILE_OVERLAP):
 
@@ -95,7 +103,6 @@ def get_subtile_pos(supertile_map, subtile_size, subtile_overlap=DEFAULT_SUBTILE
             subtile_pos[tile] = (subtile_x, subtile_y)
      
     return subtile_pos
-
 
 class StitchConfig(NamedTuple):
     """Configuration for stitching a single TEM section"""
@@ -151,9 +158,6 @@ def gen_stitch_coords(config: StitchConfig, output_file: str):
     with open(output_file, 'w') as file:
         file.write(file_content_str)
 
-
-# /scratch/zhihaozheng/mec/acqs/3-complete/Part1_reel1068_blade2_20231010/bladeseq-2023.10.10-10.14.43/s3429-2023.10.10-10.14.43/metadata/stage_positions.csv
-
 def get_image_dimension(image_path):
     image = cv2.imread(image_path)
     if image is not None:
@@ -197,3 +201,44 @@ def make_stitch_coord_from_local_blade_path(blade_path: str|Path, stitch_coord_p
     )
 
     gen_stitch_coords(stitch_config, stitch_coord_path)
+
+def make_stitch_coord_from_matrix_blade_path(blade_path: Path|str, stitch_coord_path: Path|str):
+
+    blade_path = Path(blade_path)
+    if blade_path.name.contains("bladeseq"):
+        raise NotImplementedError(f"Matrix blade path must be a single blade directory, not a bladeseq directory.{blade_path=}")
+    
+    stitch_coord_path = Path(stitch_coord_path)
+    if os.path.exists(stitch_coord_path):
+        raise ValueError(f"{stitch_coord_path} already exists.")
+    
+
+    stitch_config = StitchConfig(
+        section_dir=blade_path,
+        resolution=config.data_resolution(),
+        subtile_size=6000,
+        subtile_overlap=DEFAULT_SUBTILE_OVERLAP, # todo: configurable
+        supertile_overlap=DEFAULT_SUPERTILE_OVERLAP,
+        file_ext='bmp'
+    )
+
+    gen_stitch_coords(stitch_config, stitch_coord_path)
+
+
+
+def get_matrix_client():
+    endpoint_url = os.getenv("MATRIX_ENDPOINT_URL")
+    access_key = os.getenv("MATRIX_ACCESS_KEY")
+    secret_key = os.getenv("MATRIX_SECRET_KEY")
+    if endpoint_url is None or access_key is None or secret_key is None:
+        raise ValueError("MATRIX_ENDPOINT_URL, MATRIX_ACCESS_KEY, MATRIX_SECRET_KEY must be set.")
+   
+    matrix_client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(signature_version="s3v4"),
+    ) 
+
+    return matrix_client
