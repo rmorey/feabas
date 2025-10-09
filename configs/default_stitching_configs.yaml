@@ -80,3 +80,16 @@ rendering:
     filename_settings:  # see stitcher.MontageRenderer.plan_render_series for details
         pattern: _tr{ROW_IND}-tc{COL_IND}.png
         one_based: true # zero-based or one-based row/colume indexing
+    cloudvolume:
+        cloudpath: null # existing CloudVolume layer path, e.g. s3://bucket/dataset/image
+        mip: 0
+        fill_missing: false
+        bounded: true
+        cache: false
+        parallel: 1
+        compress: null
+        voxel_offset: [0, 0, 0]
+        z_start: 0
+        z_stride: 1
+        background_color: null
+        z_indices: {} # optional per-section overrides {SectionName: z_index}

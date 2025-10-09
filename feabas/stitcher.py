@@ -20,6 +20,7 @@ from feabas.matcher import stitching_matcher
 from feabas.mesh import Mesh
 from feabas.optimizer import SLM, relax_mesh_most_deformed
 from feabas import common, caching, storage, logging
+from feabas.cloudvolume_utils import CloudVolumeWriter, CloudVolumeParams, build_writer
 from feabas.spatial import scale_coordinates
 import feabas.constant as const
 from feabas.config import SECTION_THICKNESS, data_resolution, CHECKPOINT_TIME_INTERVAL, MAXIMUM_DEFORM_ALLOWED
@@ -1445,12 +1446,26 @@ class MontageRenderer:
 
 
     def render_series_to_file(self, bboxes, filenames, **kwargs):
+        driver_mode = kwargs.get('driver', 'image')
+        cv_settings = kwargs.get('cloudvolume_settings', None)
+        use_cloudvolume = driver_mode == 'cloudvolume'
+        cv_writer = None
+        cv_z_index = 0
         if isinstance(filenames, (dict, ts.TensorStore, TensorStoreWriter)):
             use_tensorstore = True
             rendered = bboxes
         else:
             use_tensorstore = False
             rendered = {}
+        if use_cloudvolume:
+            if cv_settings is None:
+                raise ValueError('cloudvolume_settings required for CloudVolume rendering.')
+            cv_z_index = int(cv_settings.get('z_index', 0))
+            params = cv_settings.get('params', {})
+            if isinstance(params, CloudVolumeWriter):
+                cv_writer = params
+            else:
+                cv_writer = build_writer(params)
         num_chunks = 0
         scale = kwargs.get('scale', 1.0)
         if scale > 0.33:
@@ -1458,7 +1473,19 @@ class MontageRenderer:
         else:
             ksz = round(0.5/scale) * 2 - 1
             self.image_loader._preprocess = partial(cv2.blur, ksize=(ksz, ksz))
-        if not use_tensorstore: # render as image tiles
+        if use_cloudvolume:
+            fillval = kwargs.get('fillval', self.default_fillval)
+            dtype_out = kwargs.get('dtype', self.dtype)
+            for bbox, _fname in zip(bboxes, filenames):
+                imgt = self.crop(bbox, **kwargs)
+                if imgt is None:
+                    continue
+                if (imgt is not None) and np.any(imgt != fillval, axis=None):
+                    imgt = imgt.astype(dtype_out, copy=False)
+                    if cv_writer.write_tile(bbox, imgt, cv_z_index):
+                        num_chunks += 1
+                        rendered[str(tuple(bbox))] = tuple(bbox)
+        elif not use_tensorstore: # render as image tiles
             for bbox, filename in zip(bboxes, filenames):
                 if storage.file_exists(filename):
                     rendered[filename] = bbox
@@ -1832,7 +1859,8 @@ class MontageRenderer:
         render_settings = kwargs.get('render_settings', {}).copy()
         driver = kwargs.get('driver', 'image')
         mask_out = kwargs.get('mask_out', None)
-        use_tensorstore = driver != 'image'
+        use_tensorstore = driver not in ('image', 'cloudvolume')
+        plan_driver = driver if driver != 'cloudvolume' else 'image'
         if meta_name is not None:
             if storage.file_exists(meta_name):
                 return 0
@@ -1845,9 +1873,17 @@ class MontageRenderer:
         else:
             resolution = self.resolution / scale
         render_settings['scale'] = scale
+        render_settings['driver'] = driver
+        if driver == 'cloudvolume':
+            render_settings['cloudvolume_settings'] = kwargs.get('cloudvolume_settings', {}).copy()
         out_prefix = out_prefix.replace('\\', '/')
+        plan_kwargs = kwargs.copy()
+        plan_kwargs['driver'] = plan_driver
+        plan_kwargs.pop('cloudvolume_settings', None)
+        plan_kwargs.pop('render_settings', None)
         render_series = self.plan_render_series(tile_size, prefix=out_prefix,
-            scale=scale, checkpoint_file=checkpoint_file, **kwargs)
+            scale=scale, checkpoint_file=checkpoint_file if use_tensorstore else None,
+            **plan_kwargs)
         if use_tensorstore:
             checkpoints = render_series[0]
             out_spec = render_series[1].copy()
@@ -1888,7 +1924,8 @@ class MontageRenderer:
                     with H5File(checkpoint_file, 'w') as f:
                         f.create_dataset('to_render', data=checkpoints, compression="gzip")
             else:
-                metadata.update(meta)
+                if driver == 'image':
+                    metadata.update(meta)
         if meta_name is not None:
             if use_tensorstore:
                 if not np.any(checkpoints):
@@ -1896,7 +1933,7 @@ class MontageRenderer:
                         json.dump({0: writer.spec}, f)
                     storage.remove_file(checkpoint_file)
             else:
-                if len(metadata) > 0:
+                if (driver == 'image') and (len(metadata) > 0):
                     fnames = sorted(list(metadata.keys()))
                     bboxes = []
                     for fname in fnames:

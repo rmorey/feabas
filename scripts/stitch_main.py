@@ -1,11 +1,13 @@
 import argparse
+from dataclasses import fields
 from functools import partial
 import os
 import time
 
 import feabas
 from feabas.concurrent import submit_to_workers
-from feabas import config, logging, storage
+from feabas import config, logging, storage, common
+from feabas.cloudvolume_utils import CloudVolumeParams
 
 
 def match_one_section(coordname, outname, **kwargs):
@@ -176,10 +178,28 @@ def render_main(tform_list, out_dir, **kwargs):
     logger = logger_info[0]
     driver = kwargs.get('driver', 'image')
     histeq_dir = kwargs.pop('histeq_dir', None)
-    use_tensorstore = driver != 'image'
+    cloudvolume_cfg = kwargs.pop('cloudvolume', None)
+    use_tensorstore = driver not in ('image', 'cloudvolume')
+    meta_dir = kwargs.get('meta_dir', None)
     if use_tensorstore:
-        meta_dir = kwargs['meta_dir']
+        if meta_dir is None:
+            raise ValueError('TensorStore rendering requires meta_dir in configuration.')
         storage.makedirs(meta_dir)
+    section_order_file = storage.join_paths(config.get_work_dir(), 'section_order.txt')
+    cv_writer_params = None
+    cv_z_lookup = {}
+    cv_overrides = {}
+    if driver == 'cloudvolume':
+        if cloudvolume_cfg is None:
+            raise ValueError('CloudVolume rendering requires `cloudvolume` configuration.')
+        cv_field_names = {fld.name for fld in fields(CloudVolumeParams)}
+        cv_writer_params = {k: v for k, v in cloudvolume_cfg.items() if k in cv_field_names}
+        if cv_writer_params.get('cloudpath') is None:
+            raise ValueError('`cloudvolume.cloudpath` must be set for CloudVolume rendering.')
+        cv_overrides = cloudvolume_cfg.get('z_indices', {}) or {}
+        tform_list, z_indices = common.rearrange_section_order(tform_list, section_order_file, order_file_only=True)
+        cv_z_lookup = {os.path.basename(fname).replace('.h5', ''): int(idx)
+                       for fname, idx in zip(tform_list, z_indices)}
     for tname in tform_list:
         t0 = time.time()
         sec_name = os.path.basename(tname).replace('.h5', '')
@@ -190,17 +210,28 @@ def render_main(tform_list, out_dir, **kwargs):
             sec_outdir = storage.join_paths(out_dir, sec_name)
             if use_tensorstore:
                 meta_name = storage.join_paths(meta_dir, sec_name+'.json')
-            else:
+            elif driver == 'image':
                 meta_name = storage.join_paths(sec_outdir, 'metadata.txt')
-            if storage.file_exists(meta_name, use_cache=True):
+            else:
+                meta_name = None
+            if (meta_name is not None) and storage.file_exists(meta_name, use_cache=True):
                 continue
             logger.info(f'{sec_name}: start')
             if use_tensorstore:
                 out_prefix = sec_outdir
-            else:
+            elif driver == 'image':
                 storage.makedirs(sec_outdir)
                 out_prefix = storage.join_paths(sec_outdir, sec_name)
-            num_rendered = render_one_section(tname, out_prefix, meta_name=meta_name, tfname=tfname, **kwargs)
+            else:
+                out_prefix = storage.join_paths(out_dir, sec_name)
+            section_kwargs = kwargs.copy()
+            if driver == 'cloudvolume':
+                z_index = cv_overrides.get(sec_name, cv_z_lookup.get(sec_name, 0))
+                section_kwargs['cloudvolume_settings'] = {
+                    'params': cv_writer_params,
+                    'z_index': int(z_index),
+                }
+            num_rendered = render_one_section(tname, out_prefix, meta_name=meta_name, tfname=tfname, **section_kwargs)
             logger.info(f'{sec_name}: {num_rendered} tiles | {(time.time()-t0)/60} min')
         except TimeoutError:
             logger.error(f'{sec_name}: Tensorstore timed out.')

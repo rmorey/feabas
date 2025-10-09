@@ -22,6 +22,7 @@ install_requires = [
     'scipy',
     'shapely>=2.0.0, <2.1.0',
     'tensorstore',
+    'cloud-volume>=12.0.0',
     'triangle'
 ]
 
