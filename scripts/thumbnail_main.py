@@ -368,6 +368,8 @@ def parse_args(args=None):
     parser.add_argument("--step", metavar="step", type=int, default=1)
     parser.add_argument("--stop", metavar="stop", type=int, default=0)
     parser.add_argument("--reverse",  action='store_true')
+    parser.add_argument("--ray_address", metavar="ray_address", type=str,
+                        help="address of a Ray cluster to distribute optimization workloads via Ray")
     return parser.parse_args(args)
 
 
@@ -603,6 +605,10 @@ if __name__ == '__main__':
                 stack_config = opt_configs.get('stack_config', {})
                 slide_window = opt_configs.get('slide_window', {})
                 worker_settings = opt_configs.get('worker_settings', {})
+                if args.ray_address is not None:
+                    worker_settings = worker_settings.copy()
+                    worker_settings['parallel_framework'] = 'ray'
+                    worker_settings['ray_address'] = args.ray_address
                 chunked_to_depth = chunk_settings.pop('chunked_to_depth', 0)
                 chunk_settings.setdefault('match_name_delimiter', match_name_delimiter)
                 chunk_settings.setdefault('section_list', secname_list)

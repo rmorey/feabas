@@ -141,6 +141,7 @@ def optimize_one_section(matchname, outname, **kwargs):
 
 def optmization_main(match_list, out_dir, **kwargs):
     num_workers = kwargs.pop('num_workers', 1)
+    worker_settings = kwargs.pop('worker_settings', {})
     logger_info = logging.initialize_main_logger(logger_name='stitch_optmization', mp=num_workers>1)
     kwargs['logger'] = logger_info[0]
     logger= logging.get_logger(logger_info[0])
@@ -151,7 +152,7 @@ def optmization_main(match_list, out_dir, **kwargs):
         if storage.file_exists(outname, use_cache=True):
             continue
         args_list.append((matchname, outname))
-    for _ in submit_to_workers(target_func, args=args_list, num_workers=num_workers):
+    for _ in submit_to_workers(target_func, args=args_list, num_workers=num_workers, **worker_settings):
         pass
     logger.info('finished.')
     logging.terminate_logger(*logger_info)
@@ -249,6 +250,8 @@ def parse_args(args=None):
     parser.add_argument("--step", metavar="step", type=int, default=1)
     parser.add_argument("--stop", metavar="stop", type=int, default=0)
     parser.add_argument("--reverse",  action='store_true')
+    parser.add_argument("--ray_address", metavar="ray_address", type=str,
+                        help="address of a Ray cluster to distribute optimization workloads via Ray")
     return parser.parse_args(args)
 
 
@@ -269,6 +272,11 @@ if __name__ == '__main__':
     elif args.mode.lower().startswith('o'):
         stitch_configs = stitch_configs['optimization']
         mode = 'optimization'
+        if args.ray_address is not None:
+            stitch_configs['worker_settings'] = {
+                'parallel_framework': 'ray',
+                'ray_address': args.ray_address
+            }
     elif args.mode.lower().startswith('m'):
         stitch_configs = stitch_configs['matching']
         mode = 'matching'
