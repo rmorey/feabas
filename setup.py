@@ -44,6 +44,9 @@ setup(
     include_package_data=True,
     license='MIT',
     install_requires=install_requires,
+    extras_require={
+        'ray': ['ray[default]>=2.0.0'],
+    },
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Science/Research',

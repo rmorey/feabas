@@ -305,8 +305,10 @@ def parse_args(args=None):
     parser.add_argument("--step", metavar="step", type=int, default=1)
     parser.add_argument("--stop", metavar="stop", type=int)
     parser.add_argument("--reverse",  action='store_true')
-    parser.add_argument("--slurm_config", metavar="slurm_config", type=str, 
+    parser.add_argument("--slurm_config", metavar="slurm_config", type=str,
                         help="path to the jobqueue.yaml config file to distribute optimization workloads via SLURM")
+    parser.add_argument("--ray_address", metavar="ray_address", type=str,
+                        help="address of a Ray cluster to distribute optimization workloads via Ray")
     parser.add_argument("--filter", metavar="filter", type=str)
     return parser.parse_args(args)
 
@@ -334,8 +336,13 @@ if __name__ == '__main__':
                     "parallel_framework": "slurm",
                     "config_name": config_name
                 }
+        elif (args.ray_address is not None):
+            align_config["worker_settings"] = {
+                "parallel_framework": "ray",
+                "ray_address": args.ray_address
+            }
         parallel_framework = align_config.get("worker_settings", {}).get("parallel_framework",  config.parallel_framework())
-        if parallel_framework == 'slurm':
+        if parallel_framework == 'slurm' or (parallel_framework == 'ray' and 'ray_address' in align_config.get('worker_settings', {})):
             config.set_numpy_thread_from_num_workers(1)
         else:
             num_workers = config.set_numpy_thread_from_num_workers(num_workers)

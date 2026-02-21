@@ -43,6 +43,8 @@ def parallel_framework():
         frmwk = 'thread'
     elif frmwk.startswith('da'):
         frmwk = 'dask'
+    elif frmwk.startswith('ra'):
+        frmwk = 'ray'
     else:
         raise ValueError(f'In {_default_configuration_folder}: unsupported parallel framework "{frmwk}"')
     return frmwk

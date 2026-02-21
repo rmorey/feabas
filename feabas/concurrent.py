@@ -24,13 +24,25 @@ def parse_inputs(args, kwargs):
 
 def is_daemon_process():
     from multiprocessing import current_process
-    return current_process().daemon
+    if current_process().daemon:
+        return True
+    try:
+        import ray
+        if ray.is_initialized():
+            ctx = ray.get_runtime_context()
+            if ctx.get_task_id() is not None:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def submit_to_workers(func, args=None, kwargs=None, **settings):
     parallel_framework = settings.pop('parallel_framework', DEFAUL_FRAMEWORK)
     num_workers = settings.get('num_workers', 1)
-    force_remote = settings.pop('force_remote', parallel_framework in REMOTE_FRAMEWORKS)
+    force_remote = settings.pop('force_remote',
+        parallel_framework in REMOTE_FRAMEWORKS or
+        (parallel_framework == 'ray' and settings.get('ray_address') is not None))
     N, args_n, kwargs_n = parse_inputs(args, kwargs)
     if N == 0:
         return []
@@ -52,6 +64,8 @@ def submit_to_workers(func, args=None, kwargs=None, **settings):
             yield from submit_to_dask_localcluster(func, args, kwargs, **settings)
         elif parallel_framework == 'slurm':
             yield from submit_to_dask_slurmcluster(func, args, kwargs, **settings)
+        elif parallel_framework == 'ray':
+            yield from submit_to_ray(func, args, kwargs, **settings)
         else:
             raise ValueError(f'unsupported worker type {type}')
 
@@ -180,6 +194,84 @@ def submit_to_dask_slurmcluster(func, args=None, kwargs=None, **settings):
                 relay_dask_queue_records(dask_queues)
                 res = job.result()
                 yield res
+
+
+def submit_to_ray(func, args=None, kwargs=None, **settings):
+    """
+    Ray backend: supports both local and remote (via ray_address) execution.
+    """
+    import ray
+    num_workers = settings.get('num_workers', 1)
+    max_tasks_per_child = settings.get('max_tasks_per_child', None)
+    ray_address = settings.pop('ray_address', None)
+    N, args, kwargs = parse_inputs(args, kwargs)
+    is_remote = ray_address is not None
+    index0 = list(range(N))
+    if max_tasks_per_child is None:
+        indices = [index0]
+    else:
+        batch_size = num_workers * max_tasks_per_child
+        indices = [index0[k:(k+batch_size)] for k in range(0, N, batch_size)]
+    for idx in indices:
+        if not ray.is_initialized():
+            if is_remote:
+                ray.init(address=ray_address, ignore_reinit_error=True)
+            else:
+                ray.init(num_cpus=num_workers, ignore_reinit_error=True)
+        remote_func = ray.remote(func)
+        refs = []
+        ray_queues = {}
+        for k in idx:
+            args_b = args[k]
+            kwargs_b = kwargs[k]
+            if is_remote:
+                ray_queues = replace_w_ray_queues(args_b, ray_queues)
+                ray_queues = replace_w_ray_queues(kwargs_b, ray_queues)
+            ref = remote_func.remote(*args_b, **kwargs_b)
+            refs.append(ref)
+        remaining = list(refs)
+        while remaining:
+            done, remaining = ray.wait(remaining, num_returns=1)
+            if is_remote:
+                relay_ray_queue_records(ray_queues)
+            for ref in done:
+                yield ray.get(ref)
+        if max_tasks_per_child is not None and len(indices) > 1:
+            ray.shutdown()
+
+
+def relay_ray_queue_records(ray_queues):
+    for qqs in ray_queues.values():
+        rq, lq = qqs
+        while not rq.empty():
+            try:
+                record = rq.get(timeout=0.1)
+                lq.put(record)
+            except Exception:
+                break
+
+
+def replace_w_ray_queues(input, ray_queues=None):
+    from ray.util.queue import Queue as RayQueue
+    from multiprocessing import managers
+    if ray_queues is None:
+        ray_queues = {}
+    if isinstance(input, (tuple, list)):
+        for elm in input:
+            ray_queues = replace_w_ray_queues(elm, ray_queues)
+    elif isinstance(input, dict):
+        for key, val in input.items():
+            if isinstance(val, dict):
+                ray_queues = replace_w_ray_queues(val, ray_queues)
+            elif isinstance(val, managers.BaseProxy):
+                id_val = id(val)
+                if id_val in ray_queues:
+                    rq, _ = ray_queues[id_val]
+                else:
+                    rq = RayQueue(maxsize=0)
+                    ray_queues[id_val] = (rq, val)
+                input[key] = rq
+    return ray_queues
 
 
 def relay_dask_queue_records(dask_queues):
